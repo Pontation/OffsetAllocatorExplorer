@@ -1,0 +1,4 @@
+imgui/
+.vs/
+*.vcxproj.*
+x64/
