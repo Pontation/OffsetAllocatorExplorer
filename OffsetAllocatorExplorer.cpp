@@ -8,6 +8,8 @@
 #include <GL/GL.h>
 #include <tchar.h>
 
+#include <algorithm>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 
@@ -24,8 +26,22 @@ static HGLRC g_hRC;
 static WGL_WindowData g_MainWindow;
 static int g_Width;
 static int g_Height;
-std::unique_ptr<Allocator> allocator;
-std::vector<OffsetAllocator::Allocation> allocations;
+static std::unique_ptr<Allocator> allocator;
+static std::vector<OffsetAllocator::Allocation> allocations;
+static std::unordered_set<uint32_t> keyDownLastFrame;
+
+bool IsPressed(int key)
+{
+	if (GetKeyState(key) & 0x80)
+	{
+		bool wasDownLastFrame = keyDownLastFrame.contains(key);
+		keyDownLastFrame.insert(key);
+		return !wasDownLastFrame;
+	}
+
+	keyDownLastFrame.erase(key);
+	return false;
+}
 
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
@@ -43,6 +59,7 @@ void ShowAllocatorExplorer()
 		ImGui::Text("Largest free region: %d", topLevelReport.largestFreeRegion);
 		ImGui::NewLine();
 
+		ImGui::Text("Free regions:");
 		auto fullReport = allocator->storageReportFull();
 		for (const auto& region : fullReport.freeRegions)
 		{
@@ -78,21 +95,35 @@ void ShowAllocatorExplorer()
 
 		ImGui::NewLine();
 
+		if (ImGui::Button("Clear") || IsPressed('C'))
+		{
+			allocations.clear();
+			allocator->reset();
+		}
+
+		ImGui::NewLine();
+
 		static int allocationSize = 1;
 		ImGui::InputInt("Size", &allocationSize);
 		ImGui::SameLine();
-		if (ImGui::Button("Allocate"))
+
+		if (ImGui::Button("Allocate") || IsPressed('A'))
 		{
 			auto allocation = allocator->allocate(allocationSize);
 			if (allocation.offset != Allocation::NO_SPACE)
 			{
 				allocations.emplace_back(allocation);
+				std::sort(allocations.begin(), allocations.end(), 
+					[](const OffsetAllocator::Allocation& l, const OffsetAllocator::Allocation& r) {
+						return l.offset < r.offset;
+				});
 			}
 		}
 		
 		ImGui::NewLine();
 		if (ImGui::Button("New Allocator"))
 		{
+			allocations.clear();
 			allocator.reset();
 		}
 	}
@@ -115,7 +146,6 @@ void ShowAllocatorExplorer()
 
 int main(int, char**)
 {
-	//ImGui_ImplWin32_EnableDpiAwareness();
 	WNDCLASSEXW wc = {sizeof(wc), CS_OWNDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"ImGui Example", NULL};
 	::RegisterClassExW(&wc);
 	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"OffsetAllocator Explorer", WS_OVERLAPPEDWINDOW, 100, 100, 900, 800, NULL, NULL, wc.hInstance, NULL);
@@ -138,7 +168,6 @@ int main(int, char**)
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // Enable Keyboard Controls
 
 	ImGui::StyleColorsDark();
-	//ImGui::StyleColorsClassic();
 
 	ImGui_ImplWin32_InitForOpenGL(hwnd);
 	ImGui_ImplOpenGL3_Init();
