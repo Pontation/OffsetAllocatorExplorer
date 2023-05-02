@@ -3,6 +3,7 @@
 #include "imgui_impl_win32.h"
 #include "OffsetAllocator/offsetAllocator.hpp"
 
+#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <GL/GL.h>
@@ -18,6 +19,11 @@ bool operator==(const OffsetAllocator::Allocation& left, const OffsetAllocator::
 	return left.offset == right.offset && left.metadata == right.metadata;
 }
 
+ImVec2 operator+(const ImVec2& left, const ImVec2& right)
+{
+	return ImVec2(left.x + right.x, left.y + right.y);
+}
+
 using namespace OffsetAllocator;
 
 struct WGL_WindowData { HDC hDC; };
@@ -29,6 +35,8 @@ static int g_Height;
 static std::unique_ptr<Allocator> allocator;
 static std::vector<OffsetAllocator::Allocation> allocations;
 static std::unordered_set<uint32_t> keyDownLastFrame;
+static int allocatorSize = 1024;
+static int maxAllocs = 128 * 1024;
 
 bool IsPressed(int key)
 {
@@ -95,7 +103,7 @@ void ShowAllocatorExplorer()
 
 		ImGui::NewLine();
 
-		if (ImGui::Button("Clear") || IsPressed('C'))
+		if (ImGui::Button("Clear (C)") || IsPressed('C'))
 		{
 			allocations.clear();
 			allocator->reset();
@@ -107,7 +115,7 @@ void ShowAllocatorExplorer()
 		ImGui::InputInt("Size", &allocationSize);
 		ImGui::SameLine();
 
-		if (ImGui::Button("Allocate") || IsPressed('A'))
+		if (ImGui::Button("Allocate (A)") || IsPressed('A'))
 		{
 			auto allocation = allocator->allocate(allocationSize);
 			if (allocation.offset != Allocation::NO_SPACE)
@@ -129,10 +137,7 @@ void ShowAllocatorExplorer()
 	}
 	else
 	{
-		static int allocatorSize = 1024;
 		ImGui::InputInt("Size", &allocatorSize);
-
-		static int maxAllocs = 128 * 1024;
 		ImGui::InputInt("Max Allocations", &maxAllocs);
 
 		if (ImGui::Button("Create Allocator"))
@@ -141,6 +146,69 @@ void ShowAllocatorExplorer()
 		}
 	}
 
+	ImGui::End();
+
+	ImGui::Begin("Visualization");
+	ImDrawList* draw_list = ImGui::GetWindowDrawList();
+	float bytesPerBlock = 1;
+	float pixelsPerBlock = 16;
+	float windowWidth = ImGui::GetContentRegionAvail().x;
+	float pixelsPerByte = (pixelsPerBlock / bytesPerBlock);
+	//   p        by         p*bl     p
+	// ----    / ---   =>   ------ = ---
+	//   bl       bl         bl*by    by
+	
+	ImVec2 previousPositionEnd = ImGui::GetCursorScreenPos();
+	float windowStart = previousPositionEnd.x;
+	float windowEnd = windowStart + windowWidth;
+	uint32_t previousAllocationEnd = 0;
+
+	auto drawAllocation = [=](ImVec2 start, int bytes, ImU32 color, ImU32 outlineColor)
+	{
+		while (true)
+		{			
+			int bytesRoomLeft = static_cast<int>((windowEnd - start.x) / pixelsPerByte);
+			int bytesToDraw = std::min(bytes, bytesRoomLeft);
+			ImVec2 end = start;
+			end.x += pixelsPerByte * bytesToDraw;
+			draw_list->AddRectFilled(start, end + ImVec2(0, pixelsPerBlock), outlineColor, 2.0f);
+			draw_list->AddRectFilled(start+ImVec2(1,1), end + ImVec2(-1, -1) + ImVec2(0, pixelsPerBlock), color, 2.0f);
+
+			bytes -= bytesToDraw;
+			start = end;
+
+			if (bytes == 0)
+				break;
+
+			assert(bytes > 0);
+
+			start.x = windowStart;
+			start.y += pixelsPerBlock;
+		}
+		return start;
+	};
+
+	const auto allocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
+	const auto allocatedOutlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
+	const auto deallocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+	const auto deallocatedOutlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.9f, 1.0f));
+
+	for (int i = 0; i < allocations.size(); ++i)
+	{
+		auto allocation = allocations[i];
+		auto size = allocator->allocationSize(allocation);
+
+		if (allocation.offset > previousAllocationEnd)
+		{
+			const auto freeBlockSize = allocation.offset - previousAllocationEnd;
+			previousPositionEnd = drawAllocation(previousPositionEnd, freeBlockSize, deallocatedColor, deallocatedOutlineColor);
+		}
+
+		previousPositionEnd = drawAllocation(previousPositionEnd, size, allocatedColor, allocatedOutlineColor);
+		previousAllocationEnd = allocation.offset + size;
+	}
+
+	ImGui::Dummy(ImVec2(windowWidth, previousPositionEnd.y - ImGui::GetCursorScreenPos().y));
 	ImGui::End();
 }
 
