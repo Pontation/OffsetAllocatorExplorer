@@ -10,6 +10,7 @@
 #include <tchar.h>
 
 #include <algorithm>
+#include <functional>
 #include <unordered_set>
 #include <vector>
 #include <memory>
@@ -40,7 +41,7 @@ static int maxAllocs = 128 * 1024;
 
 bool IsPressed(int key)
 {
-	if (GetKeyState(key) & 0x80)
+	if (GetKeyState(key) & 0x80 && !ImGui::GetIO().WantCaptureKeyboard)
 	{
 		bool wasDownLastFrame = keyDownLastFrame.contains(key);
 		keyDownLastFrame.insert(key);
@@ -152,40 +153,34 @@ void ShowAllocatorExplorer()
 	ImDrawList* draw_list = ImGui::GetWindowDrawList();
 	float bytesPerBlock = 1;
 	float pixelsPerBlock = 16;
-	float windowWidth = ImGui::GetContentRegionAvail().x;
+	float windowWidth = pixelsPerBlock * static_cast<int>(ImGui::GetContentRegionAvail().x / pixelsPerBlock);
 	float pixelsPerByte = (pixelsPerBlock / bytesPerBlock);
 	//   p        by         p*bl     p
 	// ----    / ---   =>   ------ = ---
 	//   bl       bl         bl*by    by
 	
-	ImVec2 previousPositionEnd = ImGui::GetCursorScreenPos();
-	float windowStart = previousPositionEnd.x;
-	float windowEnd = windowStart + windowWidth;
-	uint32_t previousAllocationEnd = 0;
+	const ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
+	float windowEnd = cursorScreenPos.x + windowWidth;
 
-	auto drawAllocation = [=](ImVec2 start, int bytes, ImU32 color, ImU32 outlineColor)
+	auto drawAllocation = [=](ImVec2 cursor, uint32_t offset, uint32_t bytes, ImU32 color, ImU32 outlineColor)
 	{
-		while (true)
-		{			
-			int bytesRoomLeft = static_cast<int>((windowEnd - start.x) / pixelsPerByte);
-			int bytesToDraw = std::min(bytes, bytesRoomLeft);
+		while (bytes > 0)
+		{
+			auto pixels = (uint32_t)pixelsPerByte * offset;
+			auto row = pixels / (uint32_t)windowWidth;
+			auto col = pixels % (uint32_t)windowWidth;
+			ImVec2 start = cursor + ImVec2((float)col, row * pixelsPerBlock);
+
+			auto bytesRoomLeft = static_cast<uint32_t>((windowEnd - start.x) / pixelsPerByte);
+			auto bytesToDraw = std::min(bytes, bytesRoomLeft);
 			ImVec2 end = start;
 			end.x += pixelsPerByte * bytesToDraw;
 			draw_list->AddRectFilled(start, end + ImVec2(0, pixelsPerBlock), outlineColor, 2.0f);
-			draw_list->AddRectFilled(start+ImVec2(1,1), end + ImVec2(-1, -1) + ImVec2(0, pixelsPerBlock), color, 2.0f);
+			draw_list->AddRectFilled(start + ImVec2(1, 1), end + ImVec2(-1, -1) + ImVec2(0, pixelsPerBlock), color, 2.0f);
 
 			bytes -= bytesToDraw;
-			start = end;
-
-			if (bytes == 0)
-				break;
-
-			assert(bytes > 0);
-
-			start.x = windowStart;
-			start.y += pixelsPerBlock;
+			offset += bytesToDraw;
 		}
-		return start;
 	};
 
 	const auto allocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
@@ -193,22 +188,118 @@ void ShowAllocatorExplorer()
 	const auto deallocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
 	const auto deallocatedOutlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.9f, 1.0f));
 
-	for (int i = 0; i < allocations.size(); ++i)
+	if (allocator)
 	{
-		auto allocation = allocations[i];
-		auto size = allocator->allocationSize(allocation);
-
-		if (allocation.offset > previousAllocationEnd)
+		for (auto allocation : allocations)
 		{
-			const auto freeBlockSize = allocation.offset - previousAllocationEnd;
-			previousPositionEnd = drawAllocation(previousPositionEnd, freeBlockSize, deallocatedColor, deallocatedOutlineColor);
+			auto size = allocator->allocationSize(allocation);
+			drawAllocation(cursorScreenPos, allocation.offset, size, allocatedColor, allocatedOutlineColor);
 		}
 
-		previousPositionEnd = drawAllocation(previousPositionEnd, size, allocatedColor, allocatedOutlineColor);
-		previousAllocationEnd = allocation.offset + size;
+		for (int i = 0; i < 32; ++i)
+		{
+			if (allocator->m_usedBinsTop & (1 << i))
+			{
+				const auto leafBins = allocator->m_usedBins[i];
+				for (int j = 0; j < 32; ++j)
+				{
+					if (leafBins & (1 << j))
+					{
+						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
+						uint32 nodeIndex = allocator->m_binIndices[binIndex];
+						auto& node = allocator->m_nodes[nodeIndex];
+
+						auto color = node.used ? allocatedColor : deallocatedColor;
+						auto outlineColor = node.used ? allocatedOutlineColor : deallocatedOutlineColor;
+
+						drawAllocation(cursorScreenPos, node.dataOffset, node.dataSize, color, outlineColor);
+					}
+				}
+			}
+		}
+
+		auto windowHeight = pixelsPerBlock * (pixelsPerByte * allocatorSize / windowWidth);
+
+		ImGui::Dummy(ImVec2(windowWidth, windowHeight));
+
+		ImGui::NewLine();
+		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, deallocatedColor, deallocatedOutlineColor);
+		ImGui::Dummy(ImVec2(pixelsPerBlock, pixelsPerBlock));
+		ImGui::SameLine();
+		ImGui::Text("Free block");
+		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, allocatedColor, allocatedOutlineColor);
+		ImGui::Dummy(ImVec2(pixelsPerBlock, pixelsPerBlock));
+		ImGui::SameLine();
+		ImGui::Text("Allocated block");
 	}
 
-	ImGui::Dummy(ImVec2(windowWidth, previousPositionEnd.y - ImGui::GetCursorScreenPos().y));
+	ImGui::End();
+
+	ImGui::Begin("Metadata");
+
+	if (allocator)
+	{
+		ImGui::Text("Size: %d", allocator->m_size);
+		ImGui::Text("Max allocs: %d", allocator->m_maxAllocs);
+		ImGui::Text("Free storage: %d", allocator->m_freeStorage);
+		ImGui::TreePush("Used bins");
+		for (int i = 0; i < 32; ++i)
+		{
+			if (allocator->m_usedBinsTop & (1 << i))
+			{
+				if (ImGui::TreeNode((void*)(intptr_t)i, "Bin: %d", i))
+				{
+					ImGui::Indent();
+					const auto leafBins = allocator->m_usedBins[i];
+					for (int j = 0; j < 32; ++j)
+					{
+						if (leafBins & (1 << j))
+						{
+							uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
+							uint32 nodeIndex = allocator->m_binIndices[binIndex];
+
+							std::function<void(int)> visitNode = [&visitNode](int nodeIndex)
+							{
+								if (ImGui::TreeNode((void*)(intptr_t)nodeIndex, "Node: %d", nodeIndex))
+								{
+									auto& node = allocator->m_nodes[nodeIndex];
+									ImGui::Text("Offset: %d", node.dataOffset);
+									ImGui::Text("Size: %d", node.dataSize);
+									ImGui::Text(node.used ? "Block in use" : "Block unused");
+									if (node.binListPrev != Allocator::Node::unused)
+									{
+										ImGui::Text("Previous bin:");
+										visitNode(node.binListPrev);
+									}
+									if (node.binListNext != Allocator::Node::unused)
+									{
+										ImGui::Text("Next bin:");
+										visitNode(node.binListNext);
+									}
+									if (node.neighborPrev != Allocator::Node::unused)
+									{
+										ImGui::Text("Previous neighbor:");
+										visitNode(node.neighborPrev);
+									}
+									if (node.neighborNext != Allocator::Node::unused)
+									{
+										ImGui::Text("Next neighbor:");
+										visitNode(node.neighborNext);
+									}
+									ImGui::TreePop();
+								}
+							};
+
+							visitNode(nodeIndex);
+						}
+					}
+					ImGui::Unindent();
+					ImGui::TreePop();
+				}
+			}
+		}
+		ImGui::TreePop();
+	}
 	ImGui::End();
 }
 
@@ -216,7 +307,7 @@ int main(int, char**)
 {
 	WNDCLASSEXW wc = {sizeof(wc), CS_OWNDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"ImGui Example", NULL};
 	::RegisterClassExW(&wc);
-	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"OffsetAllocator Explorer", WS_OVERLAPPEDWINDOW, 100, 100, 900, 800, NULL, NULL, wc.hInstance, NULL);
+	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"OffsetAllocator Explorer", WS_OVERLAPPEDWINDOW, 100, 100, 1400, 800, NULL, NULL, wc.hInstance, NULL);
 
 	if (!CreateDeviceWGL(hwnd, &g_MainWindow))
 	{
@@ -232,9 +323,6 @@ int main(int, char**)
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
-	ImGuiIO& io = ImGui::GetIO(); (void)io;
-	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // Enable Keyboard Controls
-
 	ImGui::StyleColorsDark();
 
 	ImGui_ImplWin32_InitForOpenGL(hwnd);

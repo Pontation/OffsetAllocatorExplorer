@@ -63,7 +63,7 @@ namespace OffsetAllocator
         StorageReport storageReport() const;
         StorageReportFull storageReportFull() const;
         
-    private:
+//    private:
         uint32 insertNodeIntoBin(uint32 size, uint32 dataOffset);
         void removeNodeFromBin(uint32 nodeIndex);
 
