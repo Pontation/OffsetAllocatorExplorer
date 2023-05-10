@@ -77,38 +77,6 @@ void ShowAllocatorExplorer()
 				ImGui::Text("Count: %d, size: %d", region.count, region.size);
 			}
 		}
-		ImGui::NewLine();
-
-		ImGui::Text("Allocations:");
-		OffsetAllocator::Allocation allocationToFree;
-		int id = 0;
-		for (OffsetAllocator::Allocation allocation : allocations)
-		{
-			ImGui::PushID(id++);
-			ImGui::Text("Offset: %d, size: %d", allocation.offset, allocator->allocationSize(allocation));
-			ImGui::SameLine();
-			if (ImGui::Button("Free"))
-			{
-				allocationToFree = allocation;
-			}
-			ImGui::PopID();
-		}
-
-		if (allocationToFree.offset != Allocation::NO_SPACE)
-		{
-			std::erase_if(allocations, [allocationToFree](const OffsetAllocator::Allocation& alloc) {
-				return alloc == allocationToFree;
-			});
-			allocator->free(allocationToFree);
-		}
-
-		ImGui::NewLine();
-
-		if (ImGui::Button("Clear (C)") || IsPressed('C'))
-		{
-			allocations.clear();
-			allocator->reset();
-		}
 
 		ImGui::NewLine();
 
@@ -130,18 +98,25 @@ void ShowAllocatorExplorer()
 		}
 		
 		ImGui::NewLine();
-		if (ImGui::Button("New Allocator"))
+		if (ImGui::Button("Clear Allocations (C)") || IsPressed('C'))
+		{
+			allocations.clear();
+			allocator->reset();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Destroy Allocator (D)") || IsPressed('D'))
 		{
 			allocations.clear();
 			allocator.reset();
 		}
+
 	}
 	else
 	{
 		ImGui::InputInt("Size", &allocatorSize);
 		ImGui::InputInt("Max Allocations", &maxAllocs);
 
-		if (ImGui::Button("Create Allocator"))
+		if (ImGui::Button("New Allocator (N)") || IsPressed('N'))
 		{
 			allocator = std::make_unique<Allocator>(allocatorSize, maxAllocs);
 		}
@@ -162,7 +137,7 @@ void ShowAllocatorExplorer()
 	const ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
 	float windowEnd = cursorScreenPos.x + windowWidth;
 
-	auto drawAllocation = [=](ImVec2 cursor, uint32_t offset, uint32_t bytes, ImU32 color, ImU32 outlineColor)
+	auto drawAllocation = [=](ImVec2 cursor, uint32_t offset, uint32_t bytes, ImU32 color, ImU32 outlineColor, ImU32 hoverColor, bool used)
 	{
 		while (bytes > 0)
 		{
@@ -175,9 +150,31 @@ void ShowAllocatorExplorer()
 			auto bytesToDraw = std::min(bytes, bytesRoomLeft);
 			ImVec2 end = start;
 			end.x += pixelsPerByte * bytesToDraw;
+
+			if (ImGui::IsMouseHoveringRect(start, end + ImVec2(0, pixelsPerBlock)))
+			{
+				color = hoverColor;
+				ImGui::SetTooltip("Offset: %d, size: %d", offset, bytes);
+
+				if (used && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+				{
+					auto iter = std::find_if(allocations.begin(), allocations.end(), [offset](const Allocation& allocation) {
+						return allocation.offset == offset;
+					});
+
+					assert(iter != allocations.end());
+					auto allocationToFree = *iter;
+
+					std::erase_if(allocations, [allocationToFree](const Allocation& alloc)
+					{
+						return alloc == allocationToFree;
+					});
+					allocator->free(allocationToFree);
+				}
+			}
+
 			draw_list->AddRectFilled(start, end + ImVec2(0, pixelsPerBlock), outlineColor, 2.0f);
 			draw_list->AddRectFilled(start + ImVec2(1, 1), end + ImVec2(-1, -1) + ImVec2(0, pixelsPerBlock), color, 2.0f);
-
 			bytes -= bytesToDraw;
 			offset += bytesToDraw;
 		}
@@ -190,11 +187,36 @@ void ShowAllocatorExplorer()
 
 	if (allocator)
 	{
-		for (auto allocation : allocations)
+		auto drawAllocationChain = [=](uint32_t nodeIndex)
 		{
-			auto size = allocator->allocationSize(allocation);
-			drawAllocation(cursorScreenPos, allocation.offset, size, allocatedColor, allocatedOutlineColor);
-		}
+			uint32_t i = nodeIndex;
+			while (i != Allocator::Node::unused)
+			{
+				auto& node = allocator->m_nodes[i];
+
+				auto color = node.used ? allocatedColor : deallocatedColor;
+				auto outlineColor = node.used ? allocatedOutlineColor : deallocatedOutlineColor;
+				auto hoverColor = node.used ? allocatedOutlineColor : deallocatedColor;
+
+				drawAllocation(cursorScreenPos, node.dataOffset, node.dataSize, color, outlineColor, hoverColor, node.used);
+
+				i = node.neighborPrev;
+			}
+
+			i = allocator->m_nodes[nodeIndex].neighborNext;
+			while (i != Allocator::Node::unused)
+			{
+				auto& node = allocator->m_nodes[i];
+
+				auto color = node.used ? allocatedColor : deallocatedColor;
+				auto outlineColor = node.used ? allocatedOutlineColor : deallocatedOutlineColor;
+				auto hoverColor = node.used ? allocatedOutlineColor : deallocatedColor;
+
+				drawAllocation(cursorScreenPos, node.dataOffset, node.dataSize, color, outlineColor, hoverColor, node.used);
+
+				i = node.neighborNext;
+			}
+		};
 
 		for (int i = 0; i < 32; ++i)
 		{
@@ -207,12 +229,8 @@ void ShowAllocatorExplorer()
 					{
 						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
 						uint32 nodeIndex = allocator->m_binIndices[binIndex];
-						auto& node = allocator->m_nodes[nodeIndex];
 
-						auto color = node.used ? allocatedColor : deallocatedColor;
-						auto outlineColor = node.used ? allocatedOutlineColor : deallocatedOutlineColor;
-
-						drawAllocation(cursorScreenPos, node.dataOffset, node.dataSize, color, outlineColor);
+						drawAllocationChain(nodeIndex);
 					}
 				}
 			}
@@ -223,11 +241,11 @@ void ShowAllocatorExplorer()
 		ImGui::Dummy(ImVec2(windowWidth, windowHeight));
 
 		ImGui::NewLine();
-		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, deallocatedColor, deallocatedOutlineColor);
+		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, deallocatedColor, deallocatedOutlineColor, deallocatedColor, false);
 		ImGui::Dummy(ImVec2(pixelsPerBlock, pixelsPerBlock));
 		ImGui::SameLine();
 		ImGui::Text("Free block");
-		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, allocatedColor, allocatedOutlineColor);
+		drawAllocation(ImGui::GetCursorScreenPos(), 0, 1, allocatedColor, allocatedOutlineColor, allocatedColor, false);
 		ImGui::Dummy(ImVec2(pixelsPerBlock, pixelsPerBlock));
 		ImGui::SameLine();
 		ImGui::Text("Allocated block");
@@ -239,17 +257,51 @@ void ShowAllocatorExplorer()
 
 	if (allocator)
 	{
+		std::vector<uint32_t> visitedNodes;
+		std::function<void(const char*, int)> visitNode = [&visitNode, &visitedNodes](const char* fmt, int nodeIndex)
+		{
+			if (std::find(visitedNodes.begin(), visitedNodes.end(), nodeIndex) == visitedNodes.end())
+			{
+				visitedNodes.emplace_back(nodeIndex);
+
+				ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
+				if (ImGui::TreeNode((void*)(intptr_t)nodeIndex, fmt, nodeIndex))
+				{
+					auto& node = allocator->m_nodes[nodeIndex];
+					ImGui::Text("Offset: %d", node.dataOffset);
+					ImGui::Text("Size: %d", node.dataSize);
+					ImGui::Text(node.used ? "Block in use" : "Block unused");
+					if (node.binListPrev != Allocator::Node::unused)
+						visitNode("Previous bin: %d", node.binListPrev);
+
+					if (node.binListNext != Allocator::Node::unused)
+						visitNode("Next bin: %d", node.binListNext);
+
+					if (node.neighborPrev != Allocator::Node::unused)
+						visitNode("Previous neighbor: %d", node.neighborPrev);
+
+					if (node.neighborNext != Allocator::Node::unused)
+						visitNode("Next neighbor: %d", node.neighborNext);
+
+					ImGui::TreePop();
+				}
+			}
+			else
+			{
+				ImGui::Text(fmt, nodeIndex);
+			}
+		};
+
 		ImGui::Text("Size: %d", allocator->m_size);
 		ImGui::Text("Max allocs: %d", allocator->m_maxAllocs);
 		ImGui::Text("Free storage: %d", allocator->m_freeStorage);
-		ImGui::TreePush("Used bins");
 		for (int i = 0; i < 32; ++i)
 		{
 			if (allocator->m_usedBinsTop & (1 << i))
 			{
+				ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
 				if (ImGui::TreeNode((void*)(intptr_t)i, "Bin: %d", i))
 				{
-					ImGui::Indent();
 					const auto leafBins = allocator->m_usedBins[i];
 					for (int j = 0; j < 32; ++j)
 					{
@@ -257,48 +309,14 @@ void ShowAllocatorExplorer()
 						{
 							uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
 							uint32 nodeIndex = allocator->m_binIndices[binIndex];
-
-							std::function<void(int)> visitNode = [&visitNode](int nodeIndex)
-							{
-								if (ImGui::TreeNode((void*)(intptr_t)nodeIndex, "Node: %d", nodeIndex))
-								{
-									auto& node = allocator->m_nodes[nodeIndex];
-									ImGui::Text("Offset: %d", node.dataOffset);
-									ImGui::Text("Size: %d", node.dataSize);
-									ImGui::Text(node.used ? "Block in use" : "Block unused");
-									if (node.binListPrev != Allocator::Node::unused)
-									{
-										ImGui::Text("Previous bin:");
-										visitNode(node.binListPrev);
-									}
-									if (node.binListNext != Allocator::Node::unused)
-									{
-										ImGui::Text("Next bin:");
-										visitNode(node.binListNext);
-									}
-									if (node.neighborPrev != Allocator::Node::unused)
-									{
-										ImGui::Text("Previous neighbor:");
-										visitNode(node.neighborPrev);
-									}
-									if (node.neighborNext != Allocator::Node::unused)
-									{
-										ImGui::Text("Next neighbor:");
-										visitNode(node.neighborNext);
-									}
-									ImGui::TreePop();
-								}
-							};
-
-							visitNode(nodeIndex);
+				
+							visitNode("Root: %d", nodeIndex);
 						}
 					}
-					ImGui::Unindent();
 					ImGui::TreePop();
 				}
 			}
 		}
-		ImGui::TreePop();
 	}
 	ImGui::End();
 }
