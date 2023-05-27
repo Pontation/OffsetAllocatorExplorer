@@ -14,6 +14,16 @@
 #include <unordered_set>
 #include <vector>
 #include <memory>
+#include <format>
+
+namespace OffsetAllocator 
+{
+namespace SmallFloat
+{
+uint32 floatToUint(uint32);
+}
+}
+
 
 bool operator==(const OffsetAllocator::Allocation& left, const OffsetAllocator::Allocation& right)
 {
@@ -56,6 +66,24 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+void DrawAllocatorNode(ImVec2 pos, uint32_t nodeIndex, uint32_t offset, uint32_t size, ImU32 lineColor, ImU32 boxColor, ImU32 textColor, ImVec2 boxSize, float rounding, float lineThickness, float margin)
+{
+	float lineHeight = ImGui::GetTextLineHeight();
+	auto drawList = ImGui::GetWindowDrawList();
+	drawList->AddRectFilled(pos, pos + boxSize, boxColor, rounding);
+	drawList->AddRect(pos, pos + boxSize, lineColor, rounding, 0, lineThickness);
+	std::string label = std::format("{}", nodeIndex);
+	ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+	ImVec2 textPos = pos + ImVec2((boxSize.x - textSize.x) / 2.0f, 0);
+	drawList->AddText(textPos, textColor, label.c_str());
+	pos.y += lineHeight + 2;
+	drawList->AddLine(pos, pos + ImVec2(boxSize.x, 0), lineColor, lineThickness);
+	pos.y += lineThickness;
+	drawList->AddText(pos + ImVec2(margin, 0), textColor, std::format("O: {}", offset).c_str());
+	pos.y += lineHeight;
+	drawList->AddText(pos + ImVec2(margin, 0), textColor, std::format("S: {}", size).c_str());
+}
+
 void ShowAllocatorExplorer()
 {
 	ImGui::Begin("Offset Allocator Explorer");
@@ -66,18 +94,6 @@ void ShowAllocatorExplorer()
 
 		ImGui::Text("Total free space: %d", topLevelReport.totalFreeSpace);
 		ImGui::Text("Largest free region: %d", topLevelReport.largestFreeRegion);
-		ImGui::NewLine();
-
-		ImGui::Text("Free regions:");
-		auto fullReport = allocator->storageReportFull();
-		for (const auto& region : fullReport.freeRegions)
-		{
-			if (region.count > 0)
-			{
-				ImGui::Text("Count: %d, size: %d", region.count, region.size);
-			}
-		}
-
 		ImGui::NewLine();
 
 		static int allocationSize = 1;
@@ -151,7 +167,7 @@ void ShowAllocatorExplorer()
 			ImVec2 end = start;
 			end.x += pixelsPerByte * bytesToDraw;
 
-			if (ImGui::IsMouseHoveringRect(start, end + ImVec2(0, pixelsPerBlock)))
+			if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(start, end + ImVec2(0, pixelsPerBlock)))
 			{
 				color = hoverColor;
 				ImGui::SetTooltip("Offset: %d, size: %d", offset, bytes);
@@ -182,7 +198,7 @@ void ShowAllocatorExplorer()
 
 	const auto allocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
 	const auto allocatedOutlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
-	const auto deallocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+	const auto deallocatedColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
 	const auto deallocatedOutlineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.9f, 0.9f, 0.9f, 1.0f));
 
 	if (allocator)
@@ -257,67 +273,74 @@ void ShowAllocatorExplorer()
 
 	if (allocator)
 	{
-		std::vector<uint32_t> visitedNodes;
-		std::function<void(const char*, int)> visitNode = [&visitNode, &visitedNodes](const char* fmt, int nodeIndex)
-		{
-			if (std::find(visitedNodes.begin(), visitedNodes.end(), nodeIndex) == visitedNodes.end())
-			{
-				visitedNodes.emplace_back(nodeIndex);
-
-				ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
-				if (ImGui::TreeNode((void*)(intptr_t)nodeIndex, fmt, nodeIndex))
-				{
-					auto& node = allocator->m_nodes[nodeIndex];
-					ImGui::Text("Offset: %d", node.dataOffset);
-					ImGui::Text("Size: %d", node.dataSize);
-					ImGui::Text(node.used ? "Block in use" : "Block unused");
-					if (node.binListPrev != Allocator::Node::unused)
-						visitNode("Previous bin: %d", node.binListPrev);
-
-					if (node.binListNext != Allocator::Node::unused)
-						visitNode("Next bin: %d", node.binListNext);
-
-					if (node.neighborPrev != Allocator::Node::unused)
-						visitNode("Previous neighbor: %d", node.neighborPrev);
-
-					if (node.neighborNext != Allocator::Node::unused)
-						visitNode("Next neighbor: %d", node.neighborNext);
-
-					ImGui::TreePop();
-				}
-			}
-			else
-			{
-				ImGui::Text(fmt, nodeIndex);
-			}
-		};
-
 		ImGui::Text("Size: %d", allocator->m_size);
 		ImGui::Text("Max allocs: %d", allocator->m_maxAllocs);
 		ImGui::Text("Free storage: %d", allocator->m_freeStorage);
+		for (int i = allocator->m_maxAllocs-1; i > allocator->m_freeOffset; --i)
+		{
+			const auto& nodeIndex = allocator->m_freeNodes[i];
+			const auto& node = allocator->m_nodes[nodeIndex];
+			ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+			if (ImGui::TreeNode((void*)(intptr_t)i, "Node: %d", nodeIndex))
+			{
+				if (node.binListPrev != Allocator::Node::unused)
+					ImGui::Text("Previous bin: %d", node.binListPrev);
+
+				if (node.binListNext != Allocator::Node::unused)
+					ImGui::Text("Next bin: %d", node.binListNext);
+
+				ImGui::TreePop();
+			}
+		}
+	}
+	ImGui::End();
+
+	ImGui::Begin("Nodes", 0, ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+	if (allocator)
+	{
+		ImU32 lineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+		ImU32 textColor = lineColor;
+		ImU32 boxColorUsed = allocatedColor;
+		ImU32 boxColorUnused = deallocatedColor;
+		ImU32 lineThickness = 2.0f;
+		ImU32 margin = 4.0f;
+		ImU32 rounding = 4.0f;
+		ImVec2 size(ImGui::CalcTextSize(std::format("O: {}", allocatorSize).c_str()).x + 2 * margin, 48);
 		for (int i = 0; i < 32; ++i)
 		{
 			if (allocator->m_usedBinsTop & (1 << i))
 			{
-				ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
-				if (ImGui::TreeNode((void*)(intptr_t)i, "Bin: %d", i))
+				const auto leafBins = allocator->m_usedBins[i];
+				for (int j = 0; j < 32; ++j)
 				{
-					const auto leafBins = allocator->m_usedBins[i];
-					for (int j = 0; j < 32; ++j)
+					if (leafBins & (1 << j))
 					{
-						if (leafBins & (1 << j))
+						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
+						uint32 binSize = OffsetAllocator::SmallFloat::floatToUint(binIndex);
+						
+						ImVec2 pos = ImGui::GetCursorScreenPos();
+						ImGui::GetWindowDrawList()->AddText(pos, textColor, std::format("{} ({})", binSize, binIndex).c_str());
+						pos.x += 100;
+						uint32 nodeIndex = allocator->m_binIndices[binIndex];
+						ImVec2 contentSize = ImVec2(100, 0) + size;
+						while (nodeIndex != Allocator::Node::unused)
 						{
-							uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
-							uint32 nodeIndex = allocator->m_binIndices[binIndex];
-				
-							visitNode("Root: %d", nodeIndex);
+							const auto& node = allocator->m_nodes[nodeIndex];
+							auto color = node.used ? boxColorUsed : boxColorUnused;
+							DrawAllocatorNode(pos, nodeIndex, node.dataOffset, node.dataSize, lineColor, color, textColor, size, rounding, lineThickness, margin);
+							nodeIndex = node.neighborPrev;
+							pos.x += size.x + 10;
+							contentSize.x += size.x + 10;
 						}
+						ImGui::Dummy(contentSize);
 					}
-					ImGui::TreePop();
 				}
 			}
 		}
 	}
+	
+
+	ImGui::Dummy(ImGui::GetContentRegionAvail());
 	ImGui::End();
 }
 
