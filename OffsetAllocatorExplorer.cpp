@@ -104,13 +104,7 @@ void ShowAllocatorExplorer()
 		{
 			auto allocation = allocator->allocate(allocationSize);
 			if (allocation.offset != Allocation::NO_SPACE)
-			{
 				allocations.emplace_back(allocation);
-				std::sort(allocations.begin(), allocations.end(), 
-					[](const OffsetAllocator::Allocation& l, const OffsetAllocator::Allocation& r) {
-						return l.offset < r.offset;
-				});
-			}
 		}
 		
 		ImGui::NewLine();
@@ -125,7 +119,6 @@ void ShowAllocatorExplorer()
 			allocations.clear();
 			allocator.reset();
 		}
-
 	}
 	else
 	{
@@ -276,7 +269,7 @@ void ShowAllocatorExplorer()
 		ImGui::Text("Size: %d", allocator->m_size);
 		ImGui::Text("Max allocs: %d", allocator->m_maxAllocs);
 		ImGui::Text("Free storage: %d", allocator->m_freeStorage);
-		for (int i = allocator->m_maxAllocs-1; i > allocator->m_freeOffset; --i)
+		for (uint32_t i = allocator->m_maxAllocs-1; i > allocator->m_freeOffset; --i)
 		{
 			const auto& nodeIndex = allocator->m_freeNodes[i];
 			const auto& node = allocator->m_nodes[nodeIndex];
@@ -302,9 +295,9 @@ void ShowAllocatorExplorer()
 		ImU32 textColor = lineColor;
 		ImU32 boxColorUsed = allocatedColor;
 		ImU32 boxColorUnused = deallocatedColor;
-		ImU32 lineThickness = 2.0f;
-		ImU32 margin = 4.0f;
-		ImU32 rounding = 4.0f;
+		float lineThickness = 2.0f;
+		float margin = 4.0f;
+		float rounding = 4.0f;
 		ImVec2 size(ImGui::CalcTextSize(std::format("O: {}", allocatorSize).c_str()).x + 2 * margin, 48);
 		for (int i = 0; i < 32; ++i)
 		{
