@@ -37,6 +37,21 @@ ImVec2 operator+(const ImVec2& left, const ImVec2& right)
 	return ImVec2(left.x + right.x, left.y + right.y);
 }
 
+ImVec2 operator-(const ImVec2& left, const ImVec2& right)
+{
+	return ImVec2(left.x - right.x, left.y - right.y);
+}
+
+ImVec2 operator*(const ImVec2& left, float right)
+{
+	return ImVec2(left.x * right, left.y * right);
+}
+
+ImVec2 operator*(float left, const ImVec2& right)
+{
+	return ImVec2(left * right.x, left * right.y);
+}
+
 using namespace OffsetAllocator;
 
 struct WGL_WindowData { HDC hDC; };
@@ -239,7 +254,8 @@ void ShowAllocatorExplorer()
 						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
 						uint32 nodeIndex = allocator->m_binIndices[binIndex];
 
-						drawAllocationChain(nodeIndex);
+						if(nodeIndex != Allocator::Node::unused)
+							drawAllocationChain(nodeIndex);
 					}
 				}
 			}
@@ -330,7 +346,7 @@ void ShowAllocatorExplorer()
 	}
 	ImGui::End();
 
-	ImGui::Begin("Nodes", 0, ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+	ImGui::Begin("Nodes", 0, ImGuiWindowFlags_HorizontalScrollbar);
 	if (allocator)
 	{
 		ImU32 lineColor = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
@@ -341,6 +357,9 @@ void ShowAllocatorExplorer()
 		float margin = 4.0f;
 		float rounding = 4.0f;
 		ImVec2 size(ImGui::CalcTextSize(std::format("O: {}", allocatorSize).c_str()).x + 2 * margin, 48);
+		ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
+		ImVec2 pos = cursorScreenPos;
+		ImVec2 contentSize;
 		for (int i = 0; i < 32; ++i)
 		{
 			if (allocator->m_usedBinsTop & (1 << i))
@@ -353,29 +372,75 @@ void ShowAllocatorExplorer()
 						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
 						uint32 binSize = OffsetAllocator::SmallFloat::floatToUint(binIndex);
 						
-						ImVec2 pos = ImGui::GetCursorScreenPos();
 						ImGui::GetWindowDrawList()->AddText(pos, textColor, std::format("{} ({})", binSize, binIndex).c_str());
-						pos.x += 100;
+						pos.y += ImGui::GetTextLineHeight();
 						uint32 nodeIndex = allocator->m_binIndices[binIndex];
-						ImVec2 contentSize = ImVec2(100, 0) + size;
 						while (nodeIndex != Allocator::Node::unused)
 						{
 							const auto& node = allocator->m_nodes[nodeIndex];
 							auto color = node.used ? boxColorUsed : boxColorUnused;
 							DrawAllocatorNode(pos, nodeIndex, node.dataOffset, node.dataSize, lineColor, color, textColor, size, rounding, lineThickness, margin);
 							nodeIndex = node.neighborPrev;
-							pos.x += size.x + 10;
-							contentSize.x += size.x + 10;
+							pos.y += size.y + 10;
 						}
-						ImGui::Dummy(contentSize);
+
+						pos.x += size.x + 10;
+						contentSize.x += size.x + 10;
+						contentSize.y = std::max(contentSize.y, pos.y - cursorScreenPos.y);
+						pos.y = cursorScreenPos.y;
 					}
 				}
+
 			}
 		}
+		ImGui::Dummy(contentSize);
 	}
-	
+	ImGui::End();
 
-	ImGui::Dummy(ImGui::GetContentRegionAvail());
+	ImGui::Begin("Bitmasks");
+	if (allocator)
+	{
+		auto drawList = ImGui::GetWindowDrawList();
+		auto cursor = ImGui::GetCursorScreenPos();
+		auto pos = cursor;
+		ImU32 textColor = 0xFFFFFFFF;
+		ImU32 boxColor = ImGui::ColorConvertFloat4ToU32(ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
+		ImVec2 boxSize(20, 20);
+		for (uint32_t i = 0; i < 32; ++i)
+		{
+			bool isBitSet = (allocator->m_usedBinsTop & (1 << i));
+			if(isBitSet)
+				drawList->AddRect(pos, pos + boxSize, boxColor);
+
+			std::string label = std::format("{} ", i);
+			ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+			ImVec2 finalPos = pos + 0.5f*(boxSize - textSize);
+			drawList->AddText(finalPos, textColor, label.c_str());
+
+			if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(pos, pos + boxSize))
+				ImGui::SetTooltip("%d bytes", (1 << i));
+
+			if (allocator->m_usedBins[i] != 0)
+			{
+				for (int j = 0; j < 8; ++j)
+				{
+					finalPos.y += ImGui::GetTextLineHeight() + 5;
+					if (allocator->m_usedBins[i] & (1 << j))
+						drawList->AddRect(finalPos, finalPos + boxSize, boxColor);
+
+					if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(finalPos, finalPos + boxSize))
+						ImGui::SetTooltip("%d bytes", SmallFloat::floatToUint((i << TOP_BINS_INDEX_SHIFT) | j));
+
+					drawList->AddText(finalPos, textColor, std::format("{}", j).c_str());
+				}
+			}
+
+			pos.x += boxSize.x + 10;
+			pos.y = cursor.y;
+		}
+
+		ImGui::Dummy(ImVec2(cursor.x - pos.x, cursor.y - pos.y));
+	}
 	ImGui::End();
 }
 
