@@ -15,6 +15,8 @@
 #include <vector>
 #include <memory>
 #include <format>
+#include <span>
+#include <set>
 
 namespace OffsetAllocator 
 {
@@ -62,6 +64,25 @@ bool IsPressed(int key)
 	return false;
 }
 
+void Allocate(uint32_t bytes)
+{
+	auto allocation = allocator->allocate(bytes);
+	if (allocation.offset != Allocation::NO_SPACE)
+		allocations.emplace_back(allocation);
+}
+
+void Free(uint32_t offset)
+{
+	auto iter = std::find_if(allocations.begin(), allocations.end(), [offset](const Allocation& allocation) {
+		return allocation.offset == offset; 
+	});
+
+	assert(iter != allocations.end());
+
+	allocator->free(*iter);
+	allocations.erase(iter);
+}
+
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -90,21 +111,13 @@ void ShowAllocatorExplorer()
 
 	if (allocator)
 	{
-		auto topLevelReport = allocator->storageReport();
-
-		ImGui::Text("Total free space: %d", topLevelReport.totalFreeSpace);
-		ImGui::Text("Largest free region: %d", topLevelReport.largestFreeRegion);
-		ImGui::NewLine();
-
 		static int allocationSize = 1;
 		ImGui::InputInt("Size", &allocationSize);
 		ImGui::SameLine();
 
 		if (ImGui::Button("Allocate (A)") || IsPressed('A'))
 		{
-			auto allocation = allocator->allocate(allocationSize);
-			if (allocation.offset != Allocation::NO_SPACE)
-				allocations.emplace_back(allocation);
+			Allocate(allocationSize);
 		}
 		
 		ImGui::NewLine();
@@ -166,20 +179,7 @@ void ShowAllocatorExplorer()
 				ImGui::SetTooltip("Offset: %d, size: %d", offset, bytes);
 
 				if (used && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-				{
-					auto iter = std::find_if(allocations.begin(), allocations.end(), [offset](const Allocation& allocation) {
-						return allocation.offset == offset;
-					});
-
-					assert(iter != allocations.end());
-					auto allocationToFree = *iter;
-
-					std::erase_if(allocations, [allocationToFree](const Allocation& alloc)
-					{
-						return alloc == allocationToFree;
-					});
-					allocator->free(allocationToFree);
-				}
+					Free(offset);
 			}
 
 			draw_list->AddRectFilled(start, end + ImVec2(0, pixelsPerBlock), outlineColor, 2.0f);
@@ -266,15 +266,57 @@ void ShowAllocatorExplorer()
 
 	if (allocator)
 	{
+		auto topLevelReport = allocator->storageReport();
 		ImGui::Text("Size: %d", allocator->m_size);
 		ImGui::Text("Max allocs: %d", allocator->m_maxAllocs);
-		ImGui::Text("Free storage: %d", allocator->m_freeStorage);
-		for (uint32_t i = allocator->m_maxAllocs-1; i > allocator->m_freeOffset; --i)
+		ImGui::Text("Total free space: %d", topLevelReport.totalFreeSpace);
+		ImGui::Text("Largest free region: %d", topLevelReport.largestFreeRegion);
+		ImGui::NewLine();
+
+		std::set<NodeIndex> nodes;
+		std::function<void(NodeIndex)> visitForward = [&](NodeIndex nodeIndex)
 		{
-			const auto& nodeIndex = allocator->m_freeNodes[i];
+			nodes.insert(nodeIndex);
+			const auto& node = allocator->m_nodes[nodeIndex];
+			if (node.neighborNext != Allocator::Node::unused)
+			{
+				visitForward(node.neighborNext);
+			}
+		};
+
+		std::function<void(NodeIndex)> visitBackward = [&](NodeIndex nodeIndex)
+		{
+			nodes.insert(nodeIndex);
+			const auto& node = allocator->m_nodes[nodeIndex];
+			if (node.neighborPrev != Allocator::Node::unused)
+			{
+				visitBackward(node.neighborPrev);
+			}
+		};
+
+		for (int i = 0; i < 32; ++i)
+		{
+			if (allocator->m_usedBinsTop & (1 << i))
+			{
+				const auto leafBins = allocator->m_usedBins[i];
+				for (int j = 0; j < 32; ++j)
+				{
+					if (leafBins & (1 << j))
+					{
+						uint32 binIndex = (i << TOP_BINS_INDEX_SHIFT) | j;
+						uint32 nodeIndex = allocator->m_binIndices[binIndex];
+						visitForward(nodeIndex);
+						visitBackward(nodeIndex);
+					}
+				}
+			}
+		}
+
+		for (NodeIndex nodeIndex : nodes)
+		{
 			const auto& node = allocator->m_nodes[nodeIndex];
 			ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-			if (ImGui::TreeNode((void*)(intptr_t)i, "Node: %d", nodeIndex))
+			if (ImGui::TreeNode((void*)(intptr_t)nodeIndex, "Node: %d", nodeIndex))
 			{
 				if (node.binListPrev != Allocator::Node::unused)
 					ImGui::Text("Previous bin: %d", node.binListPrev);
